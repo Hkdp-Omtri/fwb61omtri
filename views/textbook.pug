@@ -2,7 +2,7 @@ extends layout
 
 block content
   h1= title
-  - values = [{BookName: 'StrengthsFinder 2.0', free: true, published: 1991}, {BookName: 'Emergency Care', free: false, published: 2019},{BookName: 'Culture Counts', free: false, published: 2010} ]
+  - values = [{BookName: 'StrengthsFinder', free: true, published: 1991}, {BookName: 'Emergency Care', free: false, published: 2019},{BookName: 'Culture Counts', free: false, published: 2010} ]
   div(class="container-fluid")
       each item,index in values
         div(class="row" onclick=`buy(${index})`)
