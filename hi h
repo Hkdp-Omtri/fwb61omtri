@@ -1,0 +1,132 @@
+CREATE PROCEDURE [dbo].[ArubaFactProcessing]
+AS
+BEGIN
+    DECLARE @latestBatchLogdate DATETIME;
+    DECLARE @previousBatchLogdate DATETIME;
+    DECLARE @lastProcessedLogdate DATETIME;
+    DECLARE @batchExists BIT;
+
+    -- Fetching the latest Logdate from Fact.POS
+    SELECT @lastProcessedLogdate = MAX(Logdate)
+    FROM Fact.POS;
+
+    -- If no previous batches, start from the earliest
+    IF @lastProcessedLogdate IS NULL
+    BEGIN
+        -- Fetch the earliest two batches
+        SELECT @previousBatchLogdate = MIN(Logdate)
+        FROM stage.ArubaWiredConnectedInventory
+        WHERE vlan = 4 AND user_role = 'vl004-pos';
+
+        SELECT @latestBatchLogdate = MIN(Logdate)
+        FROM stage.ArubaWiredConnectedInventory
+        WHERE vlan = 4 AND user_role = 'vl004-pos'
+        AND Logdate > @previousBatchLogdate;
+
+        PRINT 'Starting from the earliest two batches.';
+    END
+    ELSE
+    BEGIN
+        -- Fetch the latest two unprocessed batches
+        SELECT TOP 1 @previousBatchLogdate = Logdate
+        FROM stage.ArubaWiredConnectedInventory
+        WHERE Logdate > @lastProcessedLogdate
+        AND vlan = 4 AND user_role = 'vl004-pos'
+        ORDER BY Logdate ASC;
+
+        SELECT TOP 1 @latestBatchLogdate = Logdate
+        FROM stage.ArubaWiredConnectedInventory
+        WHERE Logdate > @previousBatchLogdate
+        AND vlan = 4 AND user_role = 'vl004-pos'
+        ORDER BY Logdate ASC;
+
+        IF @latestBatchLogdate IS NULL
+        BEGIN
+            PRINT 'No more batches available to process.';
+            RETURN;
+        END
+    END
+
+    -- Process the latest batch first
+    PRINT 'Processing the latest batch: ' + CAST(@latestBatchLogdate AS VARCHAR(20));
+
+    -- Insert latest batch data into ArubaPOSMaster and ArubaPOS
+    INSERT INTO stage.ArubaPOSMaster (site, macaddr, POSName, name)
+    SELECT DISTINCT i.site, i.macaddr, CONCAT(i.site, 'POS', RIGHT('000' + CAST(ROW_NUMBER() OVER (PARTITION BY i.site ORDER BY i.macaddr) AS VARCHAR(4)), 4)), i.name
+    FROM stage.ArubaWiredConnectedInventory i
+    WHERE i.Logdate = @latestBatchLogdate
+    AND vlan = 4 AND user_role = 'vl004-pos'
+    AND NOT EXISTS (SELECT 1 FROM stage.ArubaPOSMaster m WHERE m.macaddr = i.macaddr);
+
+    PRINT 'Unique macaddr inserted into ArubaPOSMaster for the latest batch.';
+
+    -- Insert all data into ArubaPOS for the latest batch
+    INSERT INTO stage.ArubaPOS
+    SELECT *
+    FROM stage.ArubaWiredConnectedInventory i
+    WHERE i.Logdate = @latestBatchLogdate
+    AND vlan = 4 AND user_role = 'vl004-pos';
+
+    PRINT 'Data inserted into ArubaPOS for the latest batch.';
+
+    -- Process the previous batch (always compare both batches)
+    PRINT 'Processing the previous batch: ' + CAST(@previousBatchLogdate AS VARCHAR(20));
+
+    -- Insert previous batch data into ArubaPOSMaster and ArubaPOS
+    INSERT INTO stage.ArubaPOSMaster (site, macaddr, POSName, name)
+    SELECT DISTINCT i.site, i.macaddr, CONCAT(i.site, 'POS', RIGHT('000' + CAST(ROW_NUMBER() OVER (PARTITION BY i.site ORDER BY i.macaddr) AS VARCHAR(4)), 4)), i.name
+    FROM stage.ArubaWiredConnectedInventory i
+    WHERE i.Logdate = @previousBatchLogdate
+    AND vlan = 4 AND user_role = 'vl004-pos'
+    AND NOT EXISTS (SELECT 1 FROM stage.ArubaPOSMaster m WHERE m.macaddr = i.macaddr);
+
+    PRINT 'Unique macaddr inserted into ArubaPOSMaster for the previous batch.';
+
+    -- Insert all data into ArubaPOS for the previous batch
+    INSERT INTO stage.ArubaPOS
+    SELECT *
+    FROM stage.ArubaWiredConnectedInventory i
+    WHERE i.Logdate = @previousBatchLogdate
+    AND vlan = 4 AND user_role = 'vl004-pos';
+
+    PRINT 'Data inserted into ArubaPOS for the previous batch.';
+
+    -- Insert Connected and NotConnected devices into Fact.POS (for both batches)
+    -- <Insert Connected/NotConnected logic for both batches here>
+
+    -- Purge older records from Fact.POS to keep only the latest data
+    DELETE FROM Fact.POS
+    WHERE Logdate < (
+        SELECT MAX(Logdate)
+        FROM Fact.POS
+        WHERE macaddr = Fact.POS.macaddr  
+    );
+
+    PRINT 'Older Connected and NotConnected records purged, only the latest retained.';
+
+    -- Prepare for the next batches
+    SET @batchExists = 0;
+
+    SELECT TOP 1 @previousBatchLogdate = Logdate, @batchExists = 1
+    FROM stage.ArubaWiredConnectedInventory
+    WHERE Logdate > @latestBatchLogdate
+    AND vlan = 4 AND user_role = 'vl004-pos'
+    ORDER BY Logdate ASC;
+
+    SELECT TOP 1 @latestBatchLogdate = Logdate
+    FROM stage.ArubaWiredConnectedInventory
+    WHERE Logdate > @previousBatchLogdate
+    AND vlan = 4 AND user_role = 'vl004-pos'
+    ORDER BY Logdate ASC;
+
+    IF @batchExists = 0
+    BEGIN
+        PRINT 'No more batches available. Exiting the loop.';
+        BREAK;
+    END
+
+    PRINT 'Next batch Logdate is: ' + ISNULL(CAST(@latestBatchLogdate AS VARCHAR(20)), 'NULL');
+
+    PRINT 'Processing completed.';
+END
+GO
